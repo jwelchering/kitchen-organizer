@@ -55,4 +55,5 @@ The project could grow into a prototype that:
 3. learns user preferences over time,
 4. and visualizes shelf arrangements in a simple interface.
 
-
+## Acknowledgments
+Final project for the Building AI course of Linköping University
