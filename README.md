@@ -38,7 +38,7 @@ Possible AI methods for this project include:
 - simulated annealing
 - genetic algorithms
 - rule-based optimization
-- user feedback to adjust penalties or preferences
+- user feedback to adjust preferences by creating malus and bonus
 
 ## Challenges
 
@@ -55,4 +55,4 @@ The project could grow into a prototype that:
 3. learns user preferences over time,
 4. and visualizes shelf arrangements in a simple interface.
 
-## Acknowledgments
+
