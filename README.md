@@ -1,6 +1,6 @@
 # Kitchen Optimizer
 
-Final project for the Building AI course
+Final project for the Building AI course of the Linköping University
 
 ## Summary
 
