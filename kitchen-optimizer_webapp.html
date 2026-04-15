@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Kitchen Optimizer</title>
+
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background:#f4f4f4;}
+  textarea { width:100%; height:120px; }
+  button { padding:10px; margin-top:10px; }
+  #board { display:grid; gap:6px; margin-top:20px; }
+  .cell { background:#ddd; aspect-ratio:1; }
+</style>
+</head>
+
+<body>
+
+<h2>Kitchen Optimizer</h2>
+<div style="font-size:0.9em;margin-bottom:8px;">
+  Format: name, category, width, height, prefer_bottom
+</div>
+
+<textarea id="items">
+Milk, Dairy, 2, 2, true
+Rice, Dry goods, 2, 1, false
+Apples, Fruit, 2, 1, false
+Flour, Baking, 1, 2, true
+Pasta, Dry goods, 1, 2, false
+Juice, Beverages, 1, 2, true
+</textarea>
+
+<br>
+<button onclick="run()">Optimize</button>
+
+<div id="stats" style="margin-top:10px;"></div>
+<div id="board"></div>
+
+<script>
+
+/*
+  Kitchen Optimizer Prototype
+  ---------------------------
+  Rough heuristic approach:
+  - greedy initial placement
+  - then improve via simulated annealing
+
+  NOTE: not meant to be perfect packing, just "good enough"
+*/
+
+
+// --- parsing --------------------------------------------------
+
+function parseItems(raw) {
+  // TODO: maybe validate input more strictly
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
+  return lines.map((line, idx) => {
+    const parts = line.split(',');
+
+    return {
+      id: idx,
+      name: parts[0]?.trim(),
+      category: parts[1]?.trim(),
+      width: Number(parts[2]),
+      height: Number(parts[3]),
+      preferBottom: String(parts[4]).toLowerCase() === 'true'
+    };
+  });
+}
+
+
+// --- placement helpers ----------------------------------------
+
+function canPlace(item, x, y, occupied, W, H) {
+  if (x + item.width > W || y + item.height > H) return false;
+
+  for (let dx = 0; dx < item.width; dx++) {
+    for (let dy = 0; dy < item.height; dy++) {
+      if (occupied.has(x+dx + "," + (y+dy))) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// NOTE: duplicate logic exists in greedy + mutation, could unify later
+function buildOccupied(layout, skipIdx) {
+  const occ = new Set();
+
+  layout.forEach((p, i) => {
+    if (i === skipIdx) return;
+
+    for (let dx = 0; dx < p.item.width; dx++) {
+      for (let dy = 0; dy < p.item.height; dy++) {
+        occ.add((p.x+dx) + "," + (p.y+dy));
+      }
+    }
+  });
+
+  return occ;
+}
+
+
+// --- scoring --------------------------------------------------
+
+// quick heuristic scoring, not physically accurate
+function scoreLayout(layout) {
+  let score = 0;
+
+  for (let p of layout) {
+    score += p.item.width * p.item.height * 5;
+
+    // fragile items ideally lower
+    if (p.item.preferBottom && p.y > 1) {
+      score -= 8;
+    }
+  }
+
+  // encourage grouping
+  for (let i = 0; i < layout.length; i++) {
+    for (let j = i + 1; j < layout.length; j++) {
+      const a = layout[i];
+      const b = layout[j];
+
+      if (a.item.category === b.item.category) {
+        const d = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+        score += 3 / (1 + d);
+      }
+    }
+  }
+
+  return score;
+}
+
+
+// --- greedy init ----------------------------------------------
+
+// NOTE: could tune sorting weights further
+function sortItems(items) {
+  return items.slice().sort((a, b) => {
+    if (a.preferBottom !== b.preferBottom) {
+      return a.preferBottom ? -1 : 1;
+    }
+    return (b.width * b.height) - (a.width * a.height);
+  });
+}
+
+// evaluates a position locally (used only during greedy phase)
+function evalPos(current, item, x, y) {
+  let val = item.width * item.height * 5;
+
+  if (item.preferBottom && y > 1) val -= 8;
+
+  current.forEach(p => {
+    if (p.item.category === item.category) {
+      const dist = Math.abs(p.x - x) + Math.abs(p.y - y);
+      val += 3 / (1 + dist);
+    }
+  });
+
+  // slight bias toward bottom rows
+  val -= y * 0.5;
+
+  return val;
+}
+
+function greedyLayout(items, W, H) {
+  const sorted = sortItems(items);
+  const layout = [];
+  const occupied = new Set();
+
+  for (let item of sorted) {
+    let best = null;
+    let bestVal = -Infinity;
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+
+        if (!canPlace(item, x, y, occupied, W, H)) continue;
+
+        const val = evalPos(layout, item, x, y);
+
+        if (val > bestVal) {
+          bestVal = val;
+          best = { x, y };
+        }
+      }
+    }
+
+    if (best) {
+      layout.push({ item, x: best.x, y: best.y });
+
+      // mark occupied
+      for (let dx = 0; dx < item.width; dx++) {
+        for (let dy = 0; dy < item.height; dy++) {
+          occupied.add((best.x+dx) + "," + (best.y+dy));
+        }
+      }
+    }
+  }
+
+  return layout;
+}
+
+
+// --- mutation / neighborhood ----------------------------------
+
+// NOTE: this is pretty hacky but works ok for now
+function mutate(layout, items, W, H) {
+  const next = JSON.parse(JSON.stringify(layout));
+  const r = Math.random();
+
+  if (r < 0.5 && next.length > 0) {
+    // move item
+    const i = Math.floor(Math.random() * next.length);
+    const p = next[i];
+
+    const occ = buildOccupied(next, i);
+
+    for (let t = 0; t < 10; t++) {
+      const x = Math.floor(Math.random() * W);
+      const y = Math.floor(Math.random() * H);
+
+      if (canPlace(p.item, x, y, occ, W, H)) {
+        p.x = x;
+        p.y = y;
+        break;
+      }
+    }
+
+  } else {
+    // try to insert a missing item
+    const used = new Set(next.map(p => p.item.id));
+    const rest = items.filter(it => !used.has(it.id));
+
+    if (rest.length > 0) {
+      const item = rest[Math.floor(Math.random() * rest.length)];
+      const occ = buildOccupied(next);
+
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (canPlace(item, x, y, occ, W, H)) {
+            next.push({ item, x, y });
+            return next;
+          }
+        }
+      }
+    }
+  }
+
+  return next;
+}
+
+
+// --- optimization loop ----------------------------------------
+
+// not a "true" SA implementation, but close enough for this demo
+function optimize(items, W, H) {
+
+  let current = greedyLayout(items, W, H);
+  let currentScore = scoreLayout(current);
+
+  let best = current;
+  let bestScore = currentScore;
+
+  let T = 1.0;
+
+  for (let i = 0; i < 2000; i++) {
+
+    const candidate = mutate(current, items, W, H);
+    const s = scoreLayout(candidate);
+
+    const delta = s - currentScore;
+
+    if (delta > 0 || Math.random() < Math.exp(delta / T)) {
+      current = candidate;
+      currentScore = s;
+
+      if (s > bestScore) {
+        best = candidate;
+        bestScore = s;
+      }
+    }
+
+    T *= 0.995;
+
+    // NOTE: could add early stopping if needed
+  }
+
+  return { best, bestScore };
+}
+
+
+// --- rendering ------------------------------------------------
+
+function render(layout, W, H) {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  board.style.gridTemplateColumns = `repeat(${W},1fr)`;
+
+  for (let i = 0; i < W * H; i++) {
+    const c = document.createElement('div');
+    c.className = 'cell';
+    board.appendChild(c);
+  }
+
+  layout.forEach((p, i) => {
+    const el = document.createElement('div');
+
+    el.style.gridColumn = (p.x + 1) + " / span " + p.item.width;
+    el.style.gridRow = (p.y + 1) + " / span " + p.item.height;
+
+    // color just for differentiation
+    el.style.background = `hsl(${i * 67}, 70%, 50%)`;
+    el.style.color = 'white';
+    el.style.padding = '4px';
+
+    el.innerHTML = "<b>" + p.item.name + "</b>";
+
+    board.appendChild(el);
+  });
+}
+
+
+// --- entry point ----------------------------------------------
+
+function run() {
+  const items = parseItems(document.getElementById('items').value);
+
+  const result = optimize(items, 6, 5);
+
+  render(result.best, 6, 5);
+
+  document.getElementById('stats').innerText =
+    "Placed: " + result.best.length +
+    " | Score: " + result.bestScore.toFixed(2);
+}
+
+// run once on load
+run();
+
+</script>
+
+</body>
+</html>
